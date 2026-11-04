@@ -2,20 +2,57 @@
 """Shared XHS ledger v2. Standard library; run --help for commands."""
 import argparse
 import copy
+from contextlib import contextmanager, nullcontext
 import datetime as dt
-import fcntl
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import sys
 import tempfile
+import time
 from urllib.parse import urlparse
+
+if os.name == 'nt':
+    import msvcrt
+else:
+    import fcntl
 
 VERSION = 2
 GROUPS = ('sources', 'templates', 'products', 'uses', 'tasks', 'drafts', 'feedback_records')
 DEFAULT_ROOT = Path.home() / 'Documents/Codex/小红书笔记台账'
+
+
+@contextmanager
+def ledger_lock(path, timeout=30.0):
+    """An OS-owned lock: Windows byte-range lock, Unix flock; released on exit/crash."""
+    with path.open('a+b', buffering=0) as lock:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                lock.seek(0)
+                if os.name == 'nt':
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f'Ledger is busy: {path}; retry the same event later') from error
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            lock.seek(0)
+            if os.name == 'nt':
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def encoded(value):
@@ -361,7 +398,7 @@ def atomic_write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix='.' + path.name + '.')
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as f:
             f.write(text); f.flush(); os.fsync(f.fileno())
         os.replace(tmp, path)
     finally:
@@ -391,6 +428,11 @@ def read(root):
 
 
 def main():
+    # Windows redirected output otherwise inherits a legacy code page. Keep JSON
+    # and emoji/Chinese copy intact for callers on every platform.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['show', 'query', 'handoff', 'record', 'migrate', 'render', 'export'])
     parser.add_argument('--root', type=Path, default=Path(os.environ.get('XHS_LEDGER_ROOT', DEFAULT_ROOT)))
@@ -399,7 +441,9 @@ def main():
     parser.add_argument('--output', type=Path)
     args = parser.parse_args(); root = args.root.expanduser().resolve()
     if args.command in ('show', 'query', 'handoff'):
-        data = read(root)
+        # Coordinate reads too: Windows may deny replacing an open JSON file.
+        with ledger_lock(root / '.ledger.lock') if root.exists() else nullcontext():
+            data = read(root)
         if args.command == 'query':
             out = query(data)
         elif args.command == 'handoff':
@@ -408,12 +452,11 @@ def main():
             out = {'root': str(root), 'schema_version': VERSION, 'counts': counts(data), 'tasks': {tid: progress(data, tid) for tid in data['tasks']}}
         print(json.dumps(out, ensure_ascii=False, indent=2)); return
     root.mkdir(parents=True, exist_ok=True)
-    with (root / '.ledger.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with ledger_lock(root / '.ledger.lock'):
         path = root / 'ledger.json'; data = read(root); changed = False
         if args.command == 'record':
             require(args.input, '--input required')
-            data, changed = reduce(data, json.loads(args.input.read_text(encoding='utf-8')))
+            data, changed = reduce(data, json.loads(args.input.read_text(encoding='utf-8-sig')))
         if args.command == 'export':
             require(args.output, '--output must name a NEW directory')
             destination = args.output.expanduser().resolve()
@@ -449,5 +492,5 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (ValueError, KeyError, TypeError) as error:
+    except (ValueError, KeyError, TypeError, OSError) as error:
         raise SystemExit('Ledger error: ' + str(error))

@@ -1,6 +1,10 @@
 # 共用台账与两技能交接（v2）
 
-两个技能各自带有相同的 `scripts/ledger.py`，只依赖 Python 3.9+ 标准库（macOS/Linux）。单独安装任意一个也能读写。它们默认连接 `~/Documents/Codex/小红书笔记台账`；可通过 `XHS_LEDGER_ROOT` 或每次相同的 `--root` 改位置。不要每个产品另开一份台账。
+两个技能各自带有相同的 `scripts/ledger.py`，只依赖 Python 3.9+ 标准库（Windows/macOS/Linux）。单独安装任意一个也能读写。它们默认连接 `~/Documents/Codex/小红书笔记台账`；可通过 `XHS_LEDGER_ROOT` 或每次相同的 `--root` 改位置。不要每个产品另开一份台账。
+
+Windows 上 `~` 指当前用户目录，默认路径通常是 `C:\Users\用户名\Documents\Codex\小红书笔记台账`。目录不存在时首次 record 自动建立；只读 show 不会创建空台账。这里使用用户主目录下的 Documents 子目录，不自动跟随 OneDrive／系统“文档”重定向。如需其他位置，给两个技能相同的 `--root "D:\文案资料\小红书笔记台账"`，或设置同一个 XHS_LEDGER_ROOT。不要把 Mac 的 /Users/... 路径直接照搬到 Windows。
+
+先检查当前机器的 Python 命令和版本。macOS/Linux 通常用 `python3`；Windows 优先用已安装可用的 `py -3`，没有 py 时验证 `python` 指向 Python 3.9+ 后使用。无需因缺少 python3 这个命令就要求用户换系统。没有 Python 时说明缺少运行依赖，安装仍遵循用户授权范围。
 
 这是技能执行时主动调用的记录流程，不是后台监听器。每个实际阶段完成就写入，交付前读回核对；调用失败须说明未记成功，不声称已经自动追踪。产品资料存在任务快照，技能里不写死产品。
 
@@ -25,6 +29,16 @@ python3 scripts/ledger.py record --input /absolute/path/operation.json
 python3 scripts/ledger.py handoff --task TASK_ID
 python3 scripts/ledger.py render
 ```
+
+Windows PowerShell 示例（在技能目录执行）：
+
+```powershell
+py -3 scripts/ledger.py show
+py -3 scripts/ledger.py record --input "C:\任务资料\operation.json"
+py -3 scripts/ledger.py show --root "D:\文案资料\小红书笔记台账"
+```
+
+JSON 输入保存为 UTF-8（可带 BOM），不要使用 Windows PowerShell 旧版默认的 UTF-16 重定向。脚本输出和台账统一使用 UTF-8，中文、表情、路径空格均支持。Windows 使用系统字节锁，macOS/Linux 使用 flock；锁由系统在退出后释放，等待超时只报忙，不覆盖台账，稍后沿用原事件重试。
 
 `show` 返回计数与任务进度，`query` 返回已交付／已用来源 ID、模板使用次数、具体反馈与复查情况。默认排除旧原文；用户明确复用时才填 `reuse_reason`，不能为绕过去重随意填写。短链先通过实际页面解析成原笔记链接。不同追踪参数的同一笔记只有一个来源；不同 ID 的相同全文也拒绝重复。近似文案仍需人工判断。
 

@@ -15,27 +15,59 @@ ledger = importlib.util.module_from_spec(spec); spec.loader.exec_module(ledger)
 class LedgerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name) / 'ledger'
+        self.root = Path(self.tmp.name) / '中文台账 with spaces'
         self.n = 0
         self.start = {'event_id':'start','op':'start','task_id':'task','product':{'id':'product','name':'示例商品'},'brief':{'facts':['已确认事实'],'mandatory':['价格']},'expected':{'selections':1,'mothers':1,'variants_by_use':{'use':2}}}
         self.select = {'event_id':'select','op':'select','task_id':'task','use_id':'use','source':{'url':'https://www.xiaohongshu.com/explore/1234567890abcdef12345678?xsec_token=sample','title':'参考标题','source_text':'真实读到的完整正文','reading_scope':'full_text','read_at':'2026-01-01','provenance':'测试夹具'},'template':{'id':'pattern','name':'话题','structure':'开头到商品'},'selection':{'source_voice':'merchant','borrowed_excerpt':'正文','attraction':'具体话题','product_bridge':'匹配事实','non_transferable':'原品价格','pattern':'转场'}}
         self.mother = {'event_id':'mother','op':'drafts','task_id':'task','drafts':[{'id':'use--mother','use_id':'use','kind':'mother','expected_revision':0,'title':'母稿','body':'完整母稿正文'}]}
     def tearDown(self): self.tmp.cleanup()
     def cli(self, *args, ok=True):
-        p = subprocess.run([sys.executable,str(SCRIPT),*args,'--root',str(self.root)],text=True,capture_output=True)
+        p = subprocess.run([sys.executable,str(SCRIPT),*args,'--root',str(self.root)],text=True,encoding="utf-8",capture_output=True)
         if ok: self.assertEqual(p.returncode,0,p.stderr)
         else: self.assertNotEqual(p.returncode,0)
         return p
     def record(self, data, ok=True):
-        self.n += 1; p = Path(self.tmp.name)/f'input-{self.n}.json';p.write_text(json.dumps(data,ensure_ascii=False))
+        self.n += 1; p = Path(self.tmp.name)/f'input-{self.n}.json';p.write_text(json.dumps(data,ensure_ascii=False), encoding='utf-8')
         return self.cli('record','--input',str(p),ok=ok)
-    def data(self): return json.loads((self.root/'ledger.json').read_text())
+    def data(self): return json.loads((self.root/'ledger.json').read_text(encoding='utf-8'))
     def seed(self):
         for x in (self.start,self.select,self.mother): self.record(x)
     def variant(self,n):
         return {'event_id':f'v{n}','op':'drafts','task_id':'task','drafts':[{'id':f'use--v{n:03}','use_id':'use','kind':'variant','mother_revision':1,'expected_revision':0,'title':f'版本{n}','body':f'完整裂变正文{n}'}]}
     def test_read_empty_does_not_create(self):
         self.cli('show');self.assertFalse(self.root.exists())
+    def test_utf8_bom_emoji_and_portable_newlines(self):
+        self.root.mkdir()
+        p = Path(self.tmp.name) / '输入 operation.json'
+        p.write_text(json.dumps(self.start, ensure_ascii=False), encoding='utf-8-sig')
+        self.cli('record', '--input', str(p))
+        self.record(self.select)
+        draft = copy.deepcopy(self.mother)
+        draft['drafts'][0]['body'] = '中文商品文案～🥩\n第二段！！'
+        self.record(draft)
+        data = self.data(); v = data['drafts']['use--mother']['versions']['1']
+        self.assertEqual((self.root / v['artifact']).read_bytes(), ledger.draft_text(v).encode('utf-8'))
+        self.assertNotIn(b'\r\n', (self.root / 'ledger.json').read_bytes())
+        self.assertIn('🥩', json.loads(self.cli('handoff', '--task', 'task').stdout)['drafts']['use--mother']['versions']['1']['body'])
+    def test_lock_exclusion_timeout_and_crash_release(self):
+        self.root.mkdir()
+        lock = self.root / '.ledger.lock'
+        preamble = ('import importlib.util, pathlib, sys, os\n'
+                    f'spec=importlib.util.spec_from_file_location("ledger", {str(SCRIPT)!r})\n'
+                    'm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)\n'
+                    f'p=pathlib.Path({str(lock)!r})\n')
+        blocked = preamble + 'try:\n with m.ledger_lock(p, timeout=0.15): sys.exit(2)\nexcept TimeoutError: sys.exit(0)\n'
+        with ledger.ledger_lock(lock):
+            run = subprocess.run([sys.executable, '-c', blocked], timeout=10, capture_output=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+        crash = preamble + 'with m.ledger_lock(p, timeout=0.5): os._exit(0)\n'
+        run = subprocess.run([sys.executable, '-c', crash], timeout=10, capture_output=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        with self.assertRaisesRegex(RuntimeError, 'intentional'):
+            with ledger.ledger_lock(lock, timeout=0.5):
+                raise RuntimeError('intentional')
+        with ledger.ledger_lock(lock, timeout=0.5):
+            pass
     def test_retry_and_conflicting_event(self):
         self.seed();before=self.data();self.record(self.mother);self.assertEqual(self.data(),before)
         changed=copy.deepcopy(self.mother);changed['drafts'][0]['body']='变动';self.record(changed,ok=False);self.assertEqual(self.data(),before)
@@ -70,19 +102,19 @@ class LedgerTests(unittest.TestCase):
         h=json.loads(self.cli('handoff','--task','task2').stdout);self.assertEqual(h['task']['brief']['facts'],['另一个价格']);self.assertEqual(h['sources'],{})
     def test_v1_migration_retains_history(self):
         self.root.mkdir();old={'schema_version':1,'sources':{},'templates':{},'products':{'p':{'id':'p','name':'旧商品'}},'uses':{'old':{'id':'old','product_id':'p','source_id':None,'template_id':None,'rewrite':{'status':'done','output_location':'聊天'},'variants':{'status':'done','count':10},'feedback':{'status':'approved','target':'旧裂变组'}}},'events':[]}
-        (self.root/'ledger.json').write_text(json.dumps(old));self.cli('migrate');d=self.data();self.assertEqual(d['uses'],old['uses']);self.assertEqual(ledger.counts(d)['variants'],10);self.assertEqual(d['drafts'],{});self.assertTrue((self.root/'ledger.v1.backup.json').exists())
+        (self.root/'ledger.json').write_text(json.dumps(old), encoding='utf-8');self.cli('migrate');d=self.data();self.assertEqual(d['uses'],old['uses']);self.assertEqual(ledger.counts(d)['variants'],10);self.assertEqual(d['drafts'],{});self.assertTrue((self.root/'ledger.v1.backup.json').exists())
     def test_concurrent_no_lost_updates_and_export(self):
         self.seed();jobs=[]
         for n in range(1,9):
-            p=Path(self.tmp.name)/f'parallel{n}.json';p.write_text(json.dumps(self.variant(n)));jobs.append(subprocess.Popen([sys.executable,str(SCRIPT),'record','--root',str(self.root),'--input',str(p)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True))
+            p=Path(self.tmp.name)/f'parallel{n}.json';p.write_text(json.dumps(self.variant(n)), encoding='utf-8');jobs.append(subprocess.Popen([sys.executable,str(SCRIPT),'record','--root',str(self.root),'--input',str(p)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding="utf-8"))
         for j in jobs:
             out,err=j.communicate();self.assertEqual(j.returncode,0,err)
         d=self.data();self.assertEqual(d['uses']['use']['variants']['count'],8)
-        dest=Path(self.tmp.name)/'export';self.cli('export','--output',str(dest));self.assertEqual(json.loads((dest/'ledger.json').read_text()),d)
+        dest=Path(self.tmp.name)/'export';self.cli('export','--output',str(dest));self.assertEqual(json.loads((dest/'ledger.json').read_text(encoding='utf-8')),d)
         for draft in d['drafts'].values():
             for v in draft['versions'].values():self.assertTrue((dest/v['artifact']).exists())
     def test_artifact_recovery_and_tamper_detection(self):
-        self.seed();d=self.data();p=self.root/d['drafts']['use--mother']['versions']['1']['artifact'];p.unlink();self.cli('render');self.assertTrue(p.exists());p.write_text('外部修改');self.record(self.variant(1),ok=False);self.assertEqual(self.data(),d)
+        self.seed();d=self.data();p=self.root/d['drafts']['use--mother']['versions']['1']['artifact'];p.unlink();self.cli('render');self.assertTrue(p.exists());p.write_text('外部修改', encoding='utf-8');self.record(self.variant(1),ok=False);self.assertEqual(self.data(),d)
     def test_query_excludes_selected_before_written(self):
         self.record(self.start);self.record(self.select);q=json.loads(self.cli('query').stdout);self.assertIn('1234567890abcdef12345678',q['exclude_source_ids']);self.assertEqual(q['templates'][0]['mother_uses'],0)
     def test_publication_requires_evidence_and_is_version_scoped(self):
