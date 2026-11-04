@@ -1,0 +1,4 @@
+interface:
+  display_name: "小红书商品笔记改写与裂变"
+  short_description: "根据已选参考和当前产品资料，按认可的商家口吻改写或裂变完整笔记；不负责搜索对标"
+  default_prompt: "使用 $xhs-product-copy，根据当前产品资料和已选参考，按我认可的商家聊天口吻改写完整笔记，或将母稿裂变为指定数量的版本。"
